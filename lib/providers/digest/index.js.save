@@ -1,0 +1,117 @@
+var DigestAutograph = function(baseUrl, definition,options) {
+	var self = this;
+	var util = require('util');
+	var crypto = require('crypto');
+	this.baseUrl = baseUrl;
+	if (options == undefined)
+		options = definition;
+	this.supportsRefresh = false;
+
+	this.signature = new Buffer(util.format('%s:%s', options.userName, options.password)).toString('base64');
+	console.log(this.signature);	
+
+	this.definition = definition;
+	this.options = options;
+	var _parseChallenge = function parseChallenge(digest) {
+	    var prefix = "Digest ";
+	    var challenge = digest.substr(digest.indexOf(prefix) + prefix.length);
+		var parts = challenge.split(',');
+	    var length = parts.length;
+	    var params = {};
+	    for (var i = 0; i < length; i++) {
+		console.log(parts[i]);
+	      var part = parts[i].match(/^\s*?([^=\s]+)="?([^"]*)"?\s*?$/);
+	      if (part.length > 2) {
+        	params[part[1]] = part[2];
+	      }
+    	}
+
+	    return params;
+	  };
+	this.generateCNonce = function() { 
+		var cnonceHash = crypto.createHash('md5');
+		cnonceHash.update(Math.random().toString(36));
+		cnonce = cnonceHash.digest('hex').substr(0, 8);
+		this.cnonce = cnonce;
+		return this.cnonce;
+	}
+	this.sign401Request = function(response, request) {
+		console.log("Headers",response.headers); 
+		var authheader = _parseChallenge(response.headers['www-authenticate']);
+		console.log("Challenge",authheader);
+		self.challenge = authheader;
+
+		return self._doSignRequest(request);			
+
+	}
+	
+	this.nc = 0;
+	this.nextNonceCount = function() { 
+		this.nc++;
+		if (this.nc > 99999999)
+			this.nc = 1;
+		return ("00000000" + this.nc).substr(-8,8);
+	};
+	this._doSignRequest = function(request) {
+console.log("Signing",self.options.userName);
+		// Need to update for md5-sess, which is md5(md5(user:realm:pass):nonce:cnonce)
+	
+                var ha1 = crypto.createHash('md5').update(util.format('%s:%s:%s', self.options.userName, self.challenge.realm, self.options.password));
+                var path = require('url').parse(request.url);
+
+                var ha2 = crypto.createHash('md5').update(util.format('%s:%s',request.method, path.path));
+		if (self.challenge.qop && self.challenge.qop == "auth-int") {
+			var ha2body = crypto.createHash('md5').update(request.body).digest('hex');
+			ha2 =  crypto.createHash('md5').update(util.format('%s:%s:%s',request.method, path.path, ha2body));
+		}
+		// Need ha1:nonce:nc:cnonce:qop:ha2
+		var responseParts = [ ha1.digest('hex'), self.challenge.nonce ];
+		var nc = '';
+		var cnonce = '';
+		if (self.challenge.qop)
+		{
+			nc = self.nextNonceCount();
+			cnonce = self.generateCNonce();
+			responseParts.push(nc);
+			responseParts.push(cnonce);
+			responseParts.push(self.challenge.qop);
+		}
+		responseParts.push(ha2.digest('hex'));
+		console.log("RP",responseParts);
+		var response = crypto.createHash('md5').update(responseParts.join(':')).digest('hex');
+		var authParts = { username: self.options.userName, realm: self.challenge.realm, nonce: self.challenge.nonce, uri: path.path, qop : self.challenge.qop,
+			response: response, opaque: self.challenge.opaque };
+		console.log(authParts);
+		if (self.challenge.qop)
+		{
+			authParts['nc'] = nc;
+			authParts['cnonce'] = cnonce;
+		}
+		var strParts = [];
+		for (var key in authParts) { 
+			if (authParts[key]) { 
+				strParts.push(util.format('%s="%s"',key,authParts[key]));
+			}
+		}
+		var header = "Digest " + strParts.join(',');
+		if (!request.headers)
+			request.headers = {};
+		request.headers['Authorization'] = header;
+		return request;
+
+	}
+
+	this.signRequest = function(request) { 
+		if (this.challenge)
+			this._doSignRequest(request);
+		else
+			request.statusHandler['401'] = this.sign401Request;
+		return request;
+	}
+	this.canSignRequest = function(request) { 
+		return request.url.startsWith(this.baseUrl);
+	}
+
+};
+module.exports = DigestAutograph;
+
